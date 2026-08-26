@@ -1,20 +1,38 @@
 import { NextResponse } from "next/server";
 
-const symbols = ["AAPL", "NVDA", "MSFT", "TSLA"];
+export const dynamic = "force-dynamic";
+
+async function yahoo(symbol: string) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=1d&interval=5m`;
+  const res = await fetch(url, { cache: "no-store", headers: { "User-Agent": "Mozilla/5.0 ORION" } });
+  if (!res.ok) throw new Error(`Yahoo ${symbol}: ${res.status}`);
+  const json = await res.json();
+  const result = json?.chart?.result?.[0];
+  const meta = result?.meta;
+  const price = Number(meta?.regularMarketPrice ?? result?.indicators?.quote?.[0]?.close?.filter(Boolean).at(-1));
+  const previous = Number(meta?.chartPreviousClose ?? meta?.previousClose ?? price);
+  if (!Number.isFinite(price)) throw new Error(`No price for ${symbol}`);
+  return { price, change: previous ? ((price / previous) - 1) * 100 : 0, source: "Yahoo Finance" };
+}
+
+async function coingecko() {
+  const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd&include_24hr_change=true", { cache: "no-store" });
+  if (!res.ok) throw new Error(`CoinGecko: ${res.status}`);
+  return res.json();
+}
 
 export async function GET() {
   const data: Record<string, {price:number; change:number; source:string}> = {};
-  await Promise.all(symbols.map(async (symbol) => {
+  const jobs = ["NVDA", "MSFT", "AAPL", "TSLA"].map(async symbol => {
+    try { data[symbol] = await yahoo(symbol); } catch {}
+  });
+  jobs.push((async () => {
     try {
-      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=1d&interval=5m`;
-      const res = await fetch(url, { next: { revalidate: 60 }, headers: { "User-Agent": "Mozilla/5.0 ORION" } });
-      const json = await res.json();
-      const result = json?.chart?.result?.[0];
-      const meta = result?.meta;
-      const price = Number(meta?.regularMarketPrice ?? result?.indicators?.quote?.[0]?.close?.filter(Boolean).at(-1));
-      const previous = Number(meta?.chartPreviousClose ?? meta?.previousClose ?? price);
-      if (Number.isFinite(price)) data[symbol] = { price, change: previous ? ((price / previous) - 1) * 100 : 0, source: "Yahoo Finance chart" };
+      const c = await coingecko();
+      if (c.bitcoin) data.BTC = { price: Number(c.bitcoin.usd), change: Number(c.bitcoin.usd_24h_change || 0), source: "CoinGecko" };
+      if (c.ethereum) data.ETH = { price: Number(c.ethereum.usd), change: Number(c.ethereum.usd_24h_change || 0), source: "CoinGecko" };
     } catch {}
-  }));
-  return NextResponse.json({ fetchedAt: new Date().toISOString(), data });
+  })());
+  await Promise.all(jobs);
+  return NextResponse.json({ fetchedAt: new Date().toISOString(), data, live: Object.keys(data).length > 0, sources: ["Yahoo Finance", "CoinGecko"] });
 }
